@@ -13,11 +13,13 @@ func (e Error) Error() string { return string(e) }
 
 var _ error = Error("")
 
-// Wrap returns an error that always carries the sentinel e in its chain (so
+// wrap returns an error that always carries the sentinel e in its chain (so
 // errors.Is(result, e) holds), optionally annotated with context args and a
 // wrapped cause. The sentinel e itself is preserved unchanged in the chain;
 // context is added as a separate message layer so identity is never lost.
-func (e Error) Wrap(err error, args ...any) error {
+// It is unexported because every error the package emits is constructed here;
+// no external consumer wraps these sentinels.
+func (e Error) wrap(err error, args ...any) error {
 	switch {
 	case len(args) > 0 && err != nil:
 		return fmt.Errorf("%w: %s: %w", e, fmt.Sprint(args...), err)

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -116,6 +117,46 @@ func TestFetchRecipients(t *testing.T) {
 			want.Len(rcpts, tt.wantCount)
 		})
 	}
+}
+
+// captureHandler is a minimal slog.Handler that records the messages it
+// receives, so a test can assert the skip warning went through the injected
+// logger rather than the global one.
+type captureHandler struct{ messages *[]string }
+
+func (captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h captureHandler) Handle(_ context.Context, r slog.Record) error {
+	*h.messages = append(*h.messages, r.Message)
+	return nil
+}
+
+func (h captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h captureHandler) WithGroup(string) slog.Handler { return h }
+
+func TestFetchRecipients_InjectedLogger(t *testing.T) {
+	t.Parallel()
+	want, must := assert.New(t), require.New(t)
+
+	ed25519Key := generateEd25519Key(t)
+	var messages []string
+	logger := slog.New(captureHandler{messages: &messages})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY=\n" + ed25519Key))
+	}))
+	defer srv.Close()
+
+	client := &rewriteClient{base: srv.Client(), targetURL: srv.URL}
+
+	rcpts, err := FetchRecipients(context.Background(), client, "testuser", Logger{logger})
+
+	must.NoError(err)
+	want.Len(rcpts, 1)
+	// The unsupported key warned through the injected logger, not the global.
+	want.Equal([]string{"Skipping unsupported key"}, messages)
 }
 
 // rewriteClient rewrites the request URL to point at the test server.

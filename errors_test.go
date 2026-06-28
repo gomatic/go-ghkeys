@@ -54,7 +54,7 @@ func TestError_Wrap(t *testing.T) {
 			t.Parallel()
 			want, must := assert.New(t), require.New(t)
 
-			got := ErrFetchKeys.Wrap(tt.err, tt.args...)
+			got := ErrFetchKeys.wrap(tt.err, tt.args...)
 			must.Error(got)
 
 			want.Equal(tt.wantMessage, got.Error())
