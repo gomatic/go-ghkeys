@@ -1,6 +1,7 @@
 package ghkeys
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -184,16 +186,6 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-func TestFetchRecipients_BadURL(t *testing.T) {
-	t.Parallel()
-	must := require.New(t)
-
-	// A username containing a control character yields an invalid URL, so
-	// http.NewRequestWithContext fails before any client.Do.
-	_, err := FetchRecipients(context.Background(), errClient{}, "bad\x7fuser")
-	must.ErrorIs(err, ErrFetchKeys)
-}
-
 func TestFetchRecipients_DoError(t *testing.T) {
 	t.Parallel()
 	must := require.New(t)
@@ -221,5 +213,108 @@ func TestFetchRecipients_ReadError(t *testing.T) {
 	must := require.New(t)
 
 	_, err := FetchRecipients(context.Background(), bodyErrClient{}, "testuser")
+	must.ErrorIs(err, ErrFetchKeys)
+}
+
+// countingBody serves data while recording how many bytes are actually read
+// from it, so a test can prove the body read stops at the cap.
+type countingBody struct {
+	read *int
+	data []byte
+	pos  int
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	if b.pos >= len(b.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.data[b.pos:])
+	b.pos += n
+	*b.read += n
+	return n, nil
+}
+
+// countingClient returns a response whose body counts the bytes read from it.
+type countingClient struct {
+	read *int
+	data []byte
+}
+
+func (c countingClient) Do(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(&countingBody{data: c.data, read: c.read}),
+	}, nil
+}
+
+func TestFetchRecipients_BodyCapped(t *testing.T) {
+	t.Parallel()
+	want, must := assert.New(t), require.New(t)
+
+	// One valid key up front, then blank lines padding the body well past the
+	// cap. With io.LimitReader the read must stop at maxKeysBytes, never the
+	// full payload, and the trailing blank lines never trip the token limit.
+	data := append([]byte(generateEd25519Key(t)), bytes.Repeat([]byte("\n"), maxKeysBytes)...)
+	must.Greater(len(data), maxKeysBytes)
+
+	var readCount int
+	client := countingClient{data: data, read: &readCount}
+
+	rcpts, err := FetchRecipients(context.Background(), client, "testuser")
+	must.NoError(err)
+	want.Len(rcpts, 1)
+	// The read halted exactly at the cap, leaving the oversized tail unread.
+	want.Equal(maxKeysBytes, readCount)
+	want.Less(readCount, len(data))
+}
+
+// capturingClient records the request URL and returns a valid key body.
+type capturingClient struct {
+	url  *string
+	body string
+}
+
+func (c capturingClient) Do(req *http.Request) (*http.Response, error) {
+	*c.url = req.URL.String()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(c.body)),
+	}, nil
+}
+
+func TestFetchRecipients_UsernameEscaped(t *testing.T) {
+	t.Parallel()
+	want, must := assert.New(t), require.New(t)
+
+	var requested string
+	client := capturingClient{url: &requested, body: generateEd25519Key(t)}
+
+	// A slash-bearing username would inject extra path segments if interpolated
+	// raw; path-escaping keeps it a single segment ("a%2Fb").
+	rcpts, err := FetchRecipients(context.Background(), client, "a/b")
+	must.NoError(err)
+	want.Len(rcpts, 1)
+	want.Equal("https://github.com/a%2Fb.keys", requested)
+}
+
+// stringBodyClient returns a fixed string body with a 200 status.
+type stringBodyClient struct{ body string }
+
+func (c stringBodyClient) Do(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(c.body)),
+	}, nil
+}
+
+func TestFetchRecipients_ScannerError(t *testing.T) {
+	t.Parallel()
+	must := require.New(t)
+
+	// A single line longer than bufio's 64 KiB token limit makes scanner.Scan
+	// fail; that error must surface as ErrFetchKeys, not be silently dropped.
+	client := stringBodyClient{body: strings.Repeat("a", 70*1024)}
+
+	_, err := FetchRecipients(context.Background(), client, "testuser")
 	must.ErrorIs(err, ErrFetchKeys)
 }

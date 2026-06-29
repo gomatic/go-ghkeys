@@ -9,11 +9,12 @@ package ghkeys
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"filippo.io/age"
@@ -27,6 +28,17 @@ type HTTPClient interface {
 
 // Username is the GitHub login whose .keys endpoint is fetched.
 type Username string
+
+// keysBody is the raw authorized-keys payload fetched from the GitHub endpoint.
+type keysBody []byte
+
+// keyLine is a single authorized-keys line awaiting parse into a recipient.
+type keyLine string
+
+// maxKeysBytes caps how much of an HTTP response body is read, so a compromised
+// or MITM'd response cannot exhaust memory. A GitHub .keys listing is a handful
+// of short lines; 1 MiB is orders of magnitude beyond any legitimate response.
+const maxKeysBytes = 1 << 20
 
 // Option configures a FetchRecipients call. Options are type-based so the
 // compiler verifies each one and the public surface stays additive.
@@ -60,7 +72,10 @@ func FetchRecipients(ctx context.Context, client HTTPClient, username Username, 
 		return nil, err
 	}
 
-	recipients := parseRecipients(body, cfg.logger)
+	recipients, err := parseRecipients(body, cfg.logger)
+	if err != nil {
+		return nil, err
+	}
 	if len(recipients) == 0 {
 		return nil, ErrNoValidKeys.wrap(nil, username)
 	}
@@ -68,16 +83,10 @@ func FetchRecipients(ctx context.Context, client HTTPClient, username Username, 
 	return recipients, nil
 }
 
-// fetchKeys retrieves the raw authorized-keys body for a GitHub user.
-func fetchKeys(ctx context.Context, client HTTPClient, username Username) ([]byte, error) {
-	url := fmt.Sprintf("https://github.com/%s.keys", username)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, ErrFetchKeys.wrap(err)
-	}
-
-	resp, err := client.Do(req)
+// fetchKeys retrieves the raw authorized-keys body for a GitHub user, bounding
+// the read at maxKeysBytes so a compromised response cannot exhaust memory.
+func fetchKeys(ctx context.Context, client HTTPClient, username Username) (keysBody, error) {
+	resp, err := client.Do(keysRequest(ctx, username))
 	if err != nil {
 		return nil, ErrFetchKeys.wrap(err)
 	}
@@ -87,31 +96,57 @@ func fetchKeys(ctx context.Context, client HTTPClient, username Username) ([]byt
 		return nil, ErrFetchKeys.wrap(nil, "HTTP", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxKeysBytes))
 	if err != nil {
 		return nil, ErrFetchKeys.wrap(err)
 	}
-	return body, nil
+	return keysBody(body), nil
+}
+
+// keysRequest builds the GET request for a user's .keys listing. The username is
+// path-escaped into a single path segment via RawPath, so a slash-, query-, or
+// fragment-bearing value cannot rewrite the request target. The request is built
+// from url.URL fields rather than parsed from a string because, once escaped, the
+// target is always well-formed — there is no parse-failure path left to handle.
+func keysRequest(ctx context.Context, username Username) *http.Request {
+	name := string(username)
+	target := &url.URL{
+		Scheme:  "https",
+		Host:    "github.com",
+		Path:    "/" + name + ".keys",
+		RawPath: "/" + url.PathEscape(name) + ".keys",
+	}
+	return (&http.Request{
+		Method: http.MethodGet,
+		URL:    target,
+		Header: make(http.Header),
+		Host:   target.Host,
+	}).WithContext(ctx)
 }
 
 // parseRecipients parses every supported SSH public key line into an age
-// recipient, skipping (and logging via logger) unsupported keys.
-func parseRecipients(body []byte, logger *slog.Logger) []age.Recipient {
+// recipient, skipping (and logging via logger) unsupported keys. A scanner
+// failure (e.g. a line exceeding the 64 KiB token limit) is surfaced as
+// ErrFetchKeys rather than silently truncating the listing.
+func parseRecipients(body keysBody, logger *slog.Logger) ([]age.Recipient, error) {
 	var recipients []age.Recipient
 
-	scanner := bufio.NewScanner(strings.NewReader(string(body)))
+	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
-		if rcpt, ok := parseLine(scanner.Text(), logger); ok {
+		if rcpt, ok := parseLine(keyLine(scanner.Text()), logger); ok {
 			recipients = append(recipients, rcpt)
 		}
 	}
-	return recipients
+	if err := scanner.Err(); err != nil {
+		return nil, ErrFetchKeys.wrap(err)
+	}
+	return recipients, nil
 }
 
 // parseLine parses one authorized-keys line, returning false for blank or
 // unsupported entries and warning through logger for the latter.
-func parseLine(text string, logger *slog.Logger) (age.Recipient, bool) {
-	line := strings.TrimSpace(text)
+func parseLine(text keyLine, logger *slog.Logger) (age.Recipient, bool) {
+	line := strings.TrimSpace(string(text))
 	if line == "" {
 		return nil, false
 	}
