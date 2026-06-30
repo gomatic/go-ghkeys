@@ -61,7 +61,12 @@ type config struct {
 }
 
 // FetchRecipients fetches SSH public keys for a GitHub user and returns age recipients.
-func FetchRecipients(ctx context.Context, client HTTPClient, username Username, options ...Option) ([]age.Recipient, error) {
+func FetchRecipients(
+	ctx context.Context,
+	client HTTPClient,
+	username Username,
+	options ...Option,
+) ([]age.Recipient, error) {
 	cfg := config{logger: slog.Default()}
 	for _, opt := range options {
 		opt.Apply(&cfg)
