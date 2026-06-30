@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,7 +19,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func generateEd25519Key(t *testing.T) string {
+func generateEd25519Key(t testing.TB) string {
 	t.Helper()
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -27,7 +28,7 @@ func generateEd25519Key(t *testing.T) string {
 	return string(ssh.MarshalAuthorizedKey(sshPub))
 }
 
-func generateRSAKey(t *testing.T) string {
+func generateRSAKey(t testing.TB) string {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -317,4 +318,63 @@ func TestFetchRecipients_ScannerError(t *testing.T) {
 
 	_, err := FetchRecipients(context.Background(), client, "testuser")
 	must.ErrorIs(err, ErrFetchKeys)
+}
+
+// FuzzParseRecipients drives the key-body parser with arbitrary bytes — the
+// input-consuming seam that turns an untrusted authorized-keys payload into age
+// recipients. The contract under fuzz: never panic on any input, and on the one
+// error it may emit (a scanner failure) carry ErrFetchKeys with no recipients
+// returned alongside.
+func FuzzParseRecipients(f *testing.F) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	seeds := [][]byte{
+		[]byte(generateEd25519Key(f)),
+		[]byte(generateRSAKey(f)),
+		[]byte("ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY=\n"),
+		[]byte("ssh-ed25519 not-valid-base64 comment\n"),
+		[]byte(""),
+		[]byte("\n\n\n"),
+		[]byte("   \t  \n"),
+		[]byte("日本語 ☃\n\xff\xfe garbage\n"),
+		bytes.Repeat([]byte("a"), 100*1024),
+	}
+	for _, seed := range seeds {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, body []byte) {
+		recipients, err := parseRecipients(keysBody(body), logger)
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, ErrFetchKeys) {
+			t.Fatalf("error did not carry ErrFetchKeys: %v", err)
+		}
+		if recipients != nil {
+			t.Fatalf("recipients returned alongside error: %d", len(recipients))
+		}
+	})
+}
+
+// FuzzKeysRequest drives the username→URL builder with arbitrary strings — the
+// other untrusted-input seam. The security contract under fuzz: no username,
+// however hostile, may escape its single path segment. The escaped path is
+// always exactly "/<escaped>.keys" — one leading slash, no injected segments —
+// so a slash-, dot-dot-, query-, or fragment-bearing login cannot rewrite the
+// request target.
+func FuzzKeysRequest(f *testing.F) {
+	for _, seed := range []string{"octocat", "a/b", "../../etc/passwd", "a b", "日本語", "", "a?b#c=d", "%2e%2e%2f", "\x00"} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, name string) {
+		escaped := keysRequest(context.Background(), Username(name)).URL.EscapedPath()
+		if !strings.HasPrefix(escaped, "/") || strings.Count(escaped, "/") != 1 {
+			t.Fatalf("username %q injected a path segment: %q", name, escaped)
+		}
+		if !strings.HasSuffix(escaped, ".keys") {
+			t.Fatalf("username %q broke the .keys suffix: %q", name, escaped)
+		}
+	})
 }
