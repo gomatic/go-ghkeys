@@ -41,17 +41,24 @@ type keyLine string
 const maxKeysBytes = 1 << 20
 
 // Option configures a FetchRecipients call. Options are type-based so the
-// compiler verifies each one and the public surface stays additive.
+// compiler verifies each one and the public surface stays additive. The
+// interface is sealed (config is package-private, so only this package can
+// implement it) and apply is a pure value transform — it receives the current
+// config and returns the updated one — so options never mutate shared state
+// through a pointer.
 type Option interface {
-	Apply(*config)
+	apply(config) config
 }
 
 // Logger is an Option that routes the skip warning (emitted for keys age
 // cannot represent) to a specific slog.Logger instead of slog.Default.
 type Logger struct{ *slog.Logger }
 
-// Apply sets the injected logger on the call config.
-func (o Logger) Apply(c *config) { c.logger = o.Logger }
+// apply returns the config with the injected logger set.
+func (o Logger) apply(c config) config {
+	c.logger = o.Logger
+	return c
+}
 
 var _ Option = Logger{}
 
@@ -69,7 +76,7 @@ func FetchRecipients(
 ) ([]age.Recipient, error) {
 	cfg := config{logger: slog.Default()}
 	for _, opt := range options {
-		opt.Apply(&cfg)
+		cfg = opt.apply(cfg)
 	}
 
 	body, err := fetchKeys(ctx, client, username)
