@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	filippo.io/age v1.2.1
+	github.com/gomatic/go-error v0.3.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.53.0
 )

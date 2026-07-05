@@ -89,7 +89,7 @@ func FetchRecipients(
 		return nil, err
 	}
 	if len(recipients) == 0 {
-		return nil, ErrNoValidKeys.wrap(nil, username)
+		return nil, ErrNoValidKeys.With(nil, username)
 	}
 
 	return recipients, nil
@@ -100,17 +100,17 @@ func FetchRecipients(
 func fetchKeys(ctx context.Context, client HTTPClient, username Username) (keysBody, error) {
 	resp, err := client.Do(keysRequest(ctx, username))
 	if err != nil {
-		return nil, ErrFetchKeys.wrap(err)
+		return nil, ErrFetchKeys.With(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, ErrFetchKeys.wrap(nil, "HTTP", resp.StatusCode)
+		return nil, ErrFetchKeys.With(nil, "HTTP", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxKeysBytes))
 	if err != nil {
-		return nil, ErrFetchKeys.wrap(err)
+		return nil, ErrFetchKeys.With(err)
 	}
 	return keysBody(body), nil
 }
@@ -150,7 +150,7 @@ func parseRecipients(body keysBody, logger *slog.Logger) ([]age.Recipient, error
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, ErrFetchKeys.wrap(err)
+		return nil, ErrFetchKeys.With(err)
 	}
 	return recipients, nil
 }
