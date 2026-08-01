@@ -8,5 +8,5 @@
 # for rollout: they were structurally inert until the suite driver began
 # loading test files, and return to gating once their counts reach zero.
 soft-baseline:
-  yze/filesize: 1
-  yze/invariant: 4
+  yze/filesize: 0
+  yze/invariant: 0
