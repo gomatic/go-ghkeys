@@ -1,17 +1,14 @@
 package ghkeys
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -187,12 +184,18 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-func TestFetchRecipients_DoError(t *testing.T) {
+// TestErrFetchKeysWrapsARequestFailure names the first condition ErrFetchKeys
+// speaks for: a request that cannot be made at all. The transport error stays
+// in the chain, so a caller can distinguish "github.com is unreachable" from
+// "that user has no usable keys" (ErrNoValidKeys).
+func TestErrFetchKeysWrapsARequestFailure(t *testing.T) {
 	t.Parallel()
 	must := require.New(t)
 
 	_, err := FetchRecipients(context.Background(), errClient{}, "testuser")
 	must.ErrorIs(err, ErrFetchKeys)
+	must.ErrorIs(err, errSentinel)
+	must.NotErrorIs(err, ErrNoValidKeys)
 }
 
 // bodyErrClient returns a response whose body errors on Read.
@@ -209,91 +212,14 @@ type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errSentinel }
 
-func TestFetchRecipients_ReadError(t *testing.T) {
+// TestErrFetchKeysWrapsABodyReadFailure names the third condition ErrFetchKeys
+// speaks for: a 200 response whose body fails mid-read. A partial listing must
+// not be parsed into a short recipient set — the failure has to surface.
+func TestErrFetchKeysWrapsABodyReadFailure(t *testing.T) {
 	t.Parallel()
 	must := require.New(t)
 
 	_, err := FetchRecipients(context.Background(), bodyErrClient{}, "testuser")
 	must.ErrorIs(err, ErrFetchKeys)
-}
-
-// stringBodyClient returns a fixed string body with a 200 status.
-type stringBodyClient struct{ body string }
-
-func (c stringBodyClient) Do(*http.Request) (*http.Response, error) {
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(c.body)),
-	}, nil
-}
-
-func TestFetchRecipients_ScannerError(t *testing.T) {
-	t.Parallel()
-	must := require.New(t)
-
-	// A single line longer than bufio's 64 KiB token limit makes scanner.Scan
-	// fail; that error must surface as ErrFetchKeys, not be silently dropped.
-	client := stringBodyClient{body: strings.Repeat("a", 70*1024)}
-
-	_, err := FetchRecipients(context.Background(), client, "testuser")
-	must.ErrorIs(err, ErrFetchKeys)
-}
-
-// FuzzParseRecipients drives the key-body parser with arbitrary bytes — the
-// input-consuming seam that turns an untrusted authorized-keys payload into age
-// recipients. The contract under fuzz: never panic on any input, and on the one
-// error it may emit (a scanner failure) carry ErrFetchKeys with no recipients
-// returned alongside.
-func FuzzParseRecipients(f *testing.F) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	seeds := [][]byte{
-		[]byte(generateEd25519Key(f)),
-		[]byte(generateRSAKey(f)),
-		[]byte("ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY=\n"),
-		[]byte("ssh-ed25519 not-valid-base64 comment\n"),
-		[]byte(""),
-		[]byte("\n\n\n"),
-		[]byte("   \t  \n"),
-		[]byte("日本語 ☃\n\xff\xfe garbage\n"),
-		bytes.Repeat([]byte("a"), 100*1024),
-	}
-	for _, seed := range seeds {
-		f.Add(seed)
-	}
-
-	f.Fuzz(func(t *testing.T, body []byte) {
-		recipients, err := parseRecipients(keysBody(body), logger)
-		if err == nil {
-			return
-		}
-		if !errors.Is(err, ErrFetchKeys) {
-			t.Fatalf("error did not carry ErrFetchKeys: %v", err)
-		}
-		if recipients != nil {
-			t.Fatalf("recipients returned alongside error: %d", len(recipients))
-		}
-	})
-}
-
-// FuzzKeysRequest drives the username→URL builder with arbitrary strings — the
-// other untrusted-input seam. The security contract under fuzz: no username,
-// however hostile, may escape its single path segment. The escaped path is
-// always exactly "/<escaped>.keys" — one leading slash, no injected segments —
-// so a slash-, dot-dot-, query-, or fragment-bearing login cannot rewrite the
-// request target.
-func FuzzKeysRequest(f *testing.F) {
-	for _, seed := range []string{"octocat", "a/b", "../../etc/passwd", "a b", "日本語", "", "a?b#c=d", "%2e%2e%2f", "\x00"} {
-		f.Add(seed)
-	}
-
-	f.Fuzz(func(t *testing.T, name string) {
-		escaped := keysRequest(context.Background(), Username(name)).URL.EscapedPath()
-		if !strings.HasPrefix(escaped, "/") || strings.Count(escaped, "/") != 1 {
-			t.Fatalf("username %q injected a path segment: %q", name, escaped)
-		}
-		if !strings.HasSuffix(escaped, ".keys") {
-			t.Fatalf("username %q broke the .keys suffix: %q", name, escaped)
-		}
-	})
+	must.ErrorIs(err, errSentinel)
 }

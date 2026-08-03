@@ -124,16 +124,18 @@ func (c capturingClient) Do(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-// TestFetchKeysRefusesANonOKStatus names fetchKeys' contract at the boundary the
-// body cap does not cover: a response that is not 200 carries no keys, and
-// reading its body as an authorized-keys listing would parse an HTML error page
-// into recipients. It must be a matchable failure instead.
-func TestFetchKeysRefusesANonOKStatus(t *testing.T) {
+// TestErrFetchKeysWrapsANonOKStatus names the second condition ErrFetchKeys
+// speaks for, at the boundary the body cap does not cover: a response that is
+// not 200 carries no keys, and reading its body as an authorized-keys listing
+// would parse an HTML error page into recipients. It must be a matchable
+// failure instead.
+func TestErrFetchKeysWrapsANonOKStatus(t *testing.T) {
 	t.Parallel()
 
 	_, err := fetchKeys(context.Background(), statusClient{code: 404}, "octocat")
 
 	assert.ErrorIs(t, err, ErrFetchKeys)
+	assert.NotErrorIs(t, err, ErrNoValidKeys)
 }
 
 // statusClient returns a response with a chosen status code and an empty body.
@@ -144,4 +146,26 @@ func (c statusClient) Do(*http.Request) (*http.Response, error) {
 		StatusCode: c.code,
 		Body:       io.NopCloser(strings.NewReader("")),
 	}, nil
+}
+
+// FuzzKeysRequest drives the username→URL builder with arbitrary strings — the
+// other untrusted-input seam. The security contract under fuzz: no username,
+// however hostile, may escape its single path segment. The escaped path is
+// always exactly "/<escaped>.keys" — one leading slash, no injected segments —
+// so a slash-, dot-dot-, query-, or fragment-bearing login cannot rewrite the
+// request target.
+func FuzzKeysRequest(f *testing.F) {
+	for _, seed := range []string{"octocat", "a/b", "../../etc/passwd", "a b", "日本語", "", "a?b#c=d", "%2e%2e%2f", "\x00"} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, name string) {
+		escaped := keysRequest(context.Background(), Username(name)).URL.EscapedPath()
+		if !strings.HasPrefix(escaped, "/") || strings.Count(escaped, "/") != 1 {
+			t.Fatalf("username %q injected a path segment: %q", name, escaped)
+		}
+		if !strings.HasSuffix(escaped, ".keys") {
+			t.Fatalf("username %q broke the .keys suffix: %q", name, escaped)
+		}
+	})
 }
