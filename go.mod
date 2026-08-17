@@ -4,9 +4,9 @@ go 1.26.4
 
 require (
 	filippo.io/age v1.3.1
-	github.com/gomatic/go-error v0.3.14
+	github.com/gomatic/go-error v0.3.15
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 )
 
 require (
